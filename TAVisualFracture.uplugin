@@ -1,0 +1,19 @@
+{
+  "FileVersion": 3,
+  "Version": 120,
+  "VersionName": "0.3.0-phase-ab",
+  "FriendlyName": "TA Visual Fracture",
+  "Description": "Versioned solid-domain fracture authoring with certified Power candidates, canonical interfaces and editor visual preview. UE build validation required.",
+  "Category": "Technical Art",
+  "CreatedBy": "TAVisualFracture contributors",
+  "CanContainContent": true,
+  "IsBetaVersion": true,
+  "Plugins": [
+    {"Name": "ProceduralMeshComponent", "Enabled": true}
+  ],
+  "Modules": [
+    {"Name": "TAVisualFractureCore", "Type": "Runtime", "LoadingPhase": "Default"},
+    {"Name": "TAVisualFractureRuntime", "Type": "Runtime", "LoadingPhase": "Default"},
+    {"Name": "TAVisualFractureEditor", "Type": "Editor", "LoadingPhase": "PostEngineInit"}
+  ]
+}

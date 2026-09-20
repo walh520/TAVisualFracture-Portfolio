@@ -1,0 +1,111 @@
+#ifndef TVF_INTERIOR_DETAIL_USH
+#define TVF_INTERIOR_DETAIL_USH
+
+// Rest-space procedural interior detail. Feed RestPosition and RestGeometricNormal from the baked mesh.
+// This affects shading only: it deliberately never offsets positions or opens a closed neighboring surface.
+struct TVFInteriorSettings
+{
+    float3 LowColor;
+    float3 HighColor;
+    float Frequency;            // cycles per cm in object rest space
+    float GrainStrength;        // color variation [0,1] is a typical range
+    float RoughnessMin;
+    float RoughnessMax;
+    float NormalStrength;       // rest-normal perturbation strength
+    float DifferentialStep;     // cm, used only in finite-difference mode
+};
+
+struct TVFInteriorSample
+{
+    float3 BaseColor;
+    float Roughness;
+    float3 NormalRest;
+};
+
+float TVFInteriorHash13(float3 P)
+{
+    P = frac(P * 0.1031f);
+    P += dot(P, P.yzx + 33.33f);
+    return frac((P.x + P.y) * P.z);
+}
+
+// Value noise and its analytic gradient, before triplanar blending.
+float4 TVFInteriorValueNoiseWithGradient(float3 P)
+{
+    const float3 Cell = floor(P);
+    const float3 F = frac(P);
+    const float3 U = F * F * (3.0f - 2.0f * F);
+    const float3 DU = 6.0f * F * (1.0f - F);
+    const float N000 = TVFInteriorHash13(Cell + float3(0,0,0));
+    const float N100 = TVFInteriorHash13(Cell + float3(1,0,0));
+    const float N010 = TVFInteriorHash13(Cell + float3(0,1,0));
+    const float N110 = TVFInteriorHash13(Cell + float3(1,1,0));
+    const float N001 = TVFInteriorHash13(Cell + float3(0,0,1));
+    const float N101 = TVFInteriorHash13(Cell + float3(1,0,1));
+    const float N011 = TVFInteriorHash13(Cell + float3(0,1,1));
+    const float N111 = TVFInteriorHash13(Cell + float3(1,1,1));
+    const float X00 = lerp(N000, N100, U.x), X10 = lerp(N010, N110, U.x);
+    const float X01 = lerp(N001, N101, U.x), X11 = lerp(N011, N111, U.x);
+    const float Y0 = lerp(X00, X10, U.y), Y1 = lerp(X01, X11, U.y);
+    const float Value = lerp(Y0, Y1, U.z);
+    const float DX = DU.x * lerp(lerp(N100-N000, N110-N010, U.y), lerp(N101-N001, N111-N011, U.y), U.z);
+    const float DY = DU.y * lerp(X10-X00, X11-X01, U.z);
+    const float DZ = DU.z * (Y1-Y0);
+    return float4(Value, DX, DY, DZ);
+}
+
+float TVFInteriorTriplanarValue(float3 RestPosition, float3 RestNormal, float Frequency)
+{
+    const float3 N = abs(normalize(RestNormal));
+    const float3 W = pow(N, 4.0f) / max(dot(pow(N, 4.0f), 1.0f.xxx), 1.e-6f);
+    const float3 P = RestPosition * Frequency;
+    return W.x * TVFInteriorValueNoiseWithGradient(P.yzx).x +
+           W.y * TVFInteriorValueNoiseWithGradient(P.zxy).x +
+           W.z * TVFInteriorValueNoiseWithGradient(P.xyz).x;
+}
+
+float3 TVFInteriorAnalyticGradient(float3 RestPosition, float3 RestNormal, float Frequency)
+{
+    const float3 N = abs(normalize(RestNormal));
+    const float3 N4 = N * N * N * N;
+    const float3 W = N4 / max(dot(N4, 1.0f.xxx), 1.e-6f);
+    const float3 P = RestPosition * Frequency;
+    // The normal-based weights are held constant locally. This avoids a derivative seam at triplanar weights.
+    const float3 GX = TVFInteriorValueNoiseWithGradient(P.yzx).yzw * Frequency;
+    const float3 GY = TVFInteriorValueNoiseWithGradient(P.zxy).yzw * Frequency;
+    const float3 GZ = TVFInteriorValueNoiseWithGradient(P.xyz).yzw * Frequency;
+    return W.x * GX.zxy + W.y * GY.yzx + W.z * GZ;
+}
+
+float3 TVFInteriorDifferentialGradient(float3 RestPosition, float3 RestNormal, float Frequency, float StepCm)
+{
+    const float H = max(abs(StepCm), 1.e-3f);
+    const float Xp = TVFInteriorTriplanarValue(RestPosition + float3(H,0,0), RestNormal, Frequency);
+    const float Xm = TVFInteriorTriplanarValue(RestPosition - float3(H,0,0), RestNormal, Frequency);
+    const float Yp = TVFInteriorTriplanarValue(RestPosition + float3(0,H,0), RestNormal, Frequency);
+    const float Ym = TVFInteriorTriplanarValue(RestPosition - float3(0,H,0), RestNormal, Frequency);
+    const float Zp = TVFInteriorTriplanarValue(RestPosition + float3(0,0,H), RestNormal, Frequency);
+    const float Zm = TVFInteriorTriplanarValue(RestPosition - float3(0,0,H), RestNormal, Frequency);
+    return float3(Xp-Xm, Yp-Ym, Zp-Zm) / (2.0f * H);
+}
+
+TVFInteriorSample TVFEvaluateInteriorDetail(float3 RestPosition, float3 RestGeometricNormal, TVFInteriorSettings Settings)
+{
+    TVFInteriorSample Out;
+    const float Frequency = max(abs(Settings.Frequency), 1.e-5f);
+    const float Grain = TVFInteriorTriplanarValue(RestPosition, RestGeometricNormal, Frequency);
+    Out.BaseColor = lerp(Settings.LowColor, Settings.HighColor, saturate(Grain * Settings.GrainStrength));
+    Out.Roughness = lerp(saturate(Settings.RoughnessMin), saturate(Settings.RoughnessMax), Grain);
+
+#if defined(TVF_INTERIOR_USE_DIFFERENTIAL_NORMAL) && TVF_INTERIOR_USE_DIFFERENTIAL_NORMAL
+    const float3 Gradient = TVFInteriorDifferentialGradient(RestPosition, RestGeometricNormal, Frequency, Settings.DifferentialStep);
+#else
+    const float3 Gradient = TVFInteriorAnalyticGradient(RestPosition, RestGeometricNormal, Frequency);
+#endif
+    const float3 N = normalize(RestGeometricNormal);
+    const float3 TangentialGradient = Gradient - N * dot(Gradient, N);
+    Out.NormalRest = normalize(N - TangentialGradient * Settings.NormalStrength);
+    return Out;
+}
+
+#endif // TVF_INTERIOR_DETAIL_USH

@@ -1,0 +1,8 @@
+// Optional integration unit. Include this from a material/custom shader pass after binding its inputs.
+#include "TVFInteriorDetail.ush"
+
+TVFInteriorSample TVFEvaluateInteriorMaterial(float3 RestPosition, float3 RestGeometricNormal,
+                                              TVFInteriorSettings Settings)
+{
+    return TVFEvaluateInteriorDetail(RestPosition, RestGeometricNormal, Settings);
+}

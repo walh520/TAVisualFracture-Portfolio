@@ -1,0 +1,136 @@
+#ifndef TVF_CHUNK_INTEGRATE_USH
+#define TVF_CHUNK_INTEGRATE_USH
+
+#include "TVFChunkMotion.ush"
+
+#define TVF_CHUNK_FLAG_SLEEPING 1u
+#define TVF_CHUNK_FLAG_DETACHED 2u
+#define TVF_PATCH_HAS_VELOCITY  1u
+#define TVF_PATCH_DETACH        2u
+#define TVF_PATCH_WAKE          4u
+
+// All units are cm and seconds. This type is supplied per chunk by the host wind-field bridge.
+struct TVFChunkFieldGPU
+{
+    float4 WindDragScale;       // xyz: added world wind cm/s, w: drag multiplier >= 0
+    float4 AccelerationUnused;  // xyz: added world acceleration cm/s^2
+};
+
+// CPU topology/event code writes this one-frame buffer. Host replaces/clears it after the dispatch.
+struct TVFChunkPatchGPU
+{
+    float4 VelocityDeltaUnused;        // xyz: one-shot cm/s delta
+    float4 AngularVelocityDeltaUnused; // xyz: one-shot world radians/s delta
+    uint4 Flags;                       // bit0 velocity, bit1 detach, bit2 wake
+};
+
+// General plane equation dot(Normal, X) = Offset. The shader normalizes both normal and offset.
+struct TVFPlaneColliderGPU
+{
+    float4 NormalOffset;       // xyz normal, w offset in cm
+    float4 Response;           // x restitution, y friction, z contact angular damping, w low-speed restitution threshold
+};
+
+struct TVFChunkSimulateParameters
+{
+    float4 TimeDragSleep; // fixedStep, linearDrag, angularDrag, sleepLinearSpeed
+    float4 SleepParams;   // sleepAngularSpeed, sleepDelaySeconds, reserved, reserved
+    float4 GravityWorld;
+    float4 GlobalWindWorld;
+    uint4 Counts;         // planeCount, numChunks, substepCount, flags(bit0 fields, bit1 patches)
+};
+
+void TVFChunkApplyPatch(inout TVFChunkMotionGPU Motion, inout float SleepTimeSeconds, TVFChunkPatchGPU Patch)
+{
+    const uint Flags = Patch.Flags.x;
+    if ((Flags & TVF_PATCH_HAS_VELOCITY) != 0u)
+    {
+        Motion.VelocityMass.xyz += Patch.VelocityDeltaUnused.xyz;
+        Motion.AngularVelocitySleeping.xyz += Patch.AngularVelocityDeltaUnused.xyz;
+    }
+    if ((Flags & TVF_PATCH_DETACH) != 0u)
+        Motion.ChunkIdFlags.y |= TVF_CHUNK_FLAG_DETACHED;
+    if ((Flags & TVF_PATCH_WAKE) != 0u)
+    {
+        Motion.ChunkIdFlags.y &= ~TVF_CHUNK_FLAG_SLEEPING;
+        Motion.AngularVelocitySleeping.w = 0.0f;
+        SleepTimeSeconds = 0.0f;
+    }
+}
+
+void TVFChunkIntegrateSubstep(inout TVFChunkMotionGPU Motion, inout float SleepTimeSeconds,
+                              TVFChunkFieldGPU Field, TVFChunkSimulateParameters Parameters,
+                              StructuredBuffer<TVFPlaneColliderGPU> Planes)
+{
+    if ((Motion.ChunkIdFlags.y & TVF_CHUNK_FLAG_DETACHED) == 0u ||
+        (Motion.ChunkIdFlags.y & TVF_CHUNK_FLAG_SLEEPING) != 0u)
+        return;
+
+    const float H = Parameters.TimeDragSleep.x;
+    const float Lambda = max(0.0f, Parameters.TimeDragSleep.y * max(0.0f, Field.WindDragScale.w));
+    const float X = Lambda * H;
+    const float X2 = X * X;
+    const float X3 = X2 * X;
+    const float X4 = X2 * X2;
+    // B subtracts nearby floats when drag is small, so retain a wider Taylor interval in float shader math.
+    const float A = X < 0.1f ? H * (1.0f - X * 0.5f + X2 / 6.0f - X3 / 24.0f + X4 / 120.0f) :
+        (1.0f - exp(-X)) / Lambda;
+    const float B = X < 0.1f ? H * H * (0.5f - X / 6.0f + X2 / 24.0f - X3 / 120.0f + X4 / 720.0f) :
+        (H - A) / Lambda;
+    const float3 Wind = Parameters.GlobalWindWorld.xyz + Field.WindDragScale.xyz;
+    const float3 Acceleration = Parameters.GravityWorld.xyz + Field.AccelerationUnused.xyz;
+    const float3 OldVelocity = Motion.VelocityMass.xyz;
+    Motion.CurrentPositionRadius.xyz += OldVelocity * H + (Acceleration - Lambda * (OldVelocity - Wind)) * B;
+    Motion.VelocityMass.xyz = Wind + (OldVelocity - Wind) * exp(-X) + Acceleration * A;
+
+    const float AngularLambda = max(0.0f, Parameters.TimeDragSleep.z);
+    const float AngularX = AngularLambda * H;
+    const float AngularX2 = AngularX * AngularX;
+    const float AngularX3 = AngularX2 * AngularX;
+    const float AngularX4 = AngularX2 * AngularX2;
+    const float AngularTravel = AngularX < 0.1f ? H * (1.0f - AngularX * 0.5f + AngularX2 / 6.0f - AngularX3 / 24.0f + AngularX4 / 120.0f) :
+        (1.0f - exp(-AngularX)) / AngularLambda;
+    const float3 OldAngularVelocity = Motion.AngularVelocitySleeping.xyz;
+    Motion.AngularVelocitySleeping.xyz = OldAngularVelocity * exp(-AngularX);
+    // World omega: delta quaternion is left-multiplied, exactly like the CPU reference path.
+    Motion.CurrentRotation = TVFQuatNormalize(TVFQuatMul(TVFQuatFromRotationVector(OldAngularVelocity * AngularTravel), Motion.CurrentRotation));
+
+    bool Contact = false;
+    float ContactAngularDamping = 0.0f;
+    [loop]
+    for (uint PlaneIndex = 0u; PlaneIndex < Parameters.Counts.x; ++PlaneIndex)
+    {
+        const TVFPlaneColliderGPU Plane = Planes[PlaneIndex];
+        const float NormalLength = length(Plane.NormalOffset.xyz);
+        if (NormalLength <= 1.e-8f) continue;
+        const float3 N = Plane.NormalOffset.xyz / NormalLength;
+        const float SignedCenterDistance = dot(N, Motion.CurrentPositionRadius.xyz) - Plane.NormalOffset.w / NormalLength;
+        const float Penetration = Motion.CurrentPositionRadius.w - SignedCenterDistance;
+        if (Penetration <= 0.0f) continue;
+        Contact = true;
+        Motion.CurrentPositionRadius.xyz += N * Penetration;
+        const float NormalVelocity = dot(Motion.VelocityMass.xyz, N);
+        const float3 TangentVelocity = Motion.VelocityMass.xyz - N * NormalVelocity;
+        const float Restitution = (-NormalVelocity < max(0.0f, Plane.Response.w)) ? 0.0f : saturate(Plane.Response.x);
+        const float OutgoingNormal = NormalVelocity < 0.0f ? -Restitution * NormalVelocity : NormalVelocity;
+        Motion.VelocityMass.xyz = N * OutgoingNormal + TangentVelocity * (1.0f - saturate(Plane.Response.y));
+        ContactAngularDamping = max(ContactAngularDamping, max(0.0f, Plane.Response.z));
+    }
+    Motion.AngularVelocitySleeping.xyz *= exp(-ContactAngularDamping * H);
+
+    if (Contact && length(Motion.VelocityMass.xyz) <= Parameters.TimeDragSleep.w &&
+        length(Motion.AngularVelocitySleeping.xyz) <= Parameters.SleepParams.x)
+    {
+        SleepTimeSeconds += H;
+        if (SleepTimeSeconds >= Parameters.SleepParams.y)
+        {
+            Motion.ChunkIdFlags.y |= TVF_CHUNK_FLAG_SLEEPING;
+            Motion.VelocityMass.xyz = float3(0.0f, 0.0f, 0.0f);
+            Motion.AngularVelocitySleeping.xyz = float3(0.0f, 0.0f, 0.0f);
+        }
+    }
+    else SleepTimeSeconds = 0.0f;
+    Motion.AngularVelocitySleeping.w = ((Motion.ChunkIdFlags.y & TVF_CHUNK_FLAG_SLEEPING) != 0u) ? 1.0f : 0.0f;
+}
+
+#endif // TVF_CHUNK_INTEGRATE_USH

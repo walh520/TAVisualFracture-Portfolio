@@ -1,0 +1,83 @@
+#ifndef TVF_CHUNK_MOTION_USH
+#define TVF_CHUNK_MOTION_USH
+
+// Must exactly match tvf::GpuChunkMotion (128 bytes, eight 16-byte records).
+// Quaternions are xyzw; this file intentionally has no UE-specific resource binding.
+struct TVFChunkMotionGPU
+{
+    float4 CurrentPositionRadius;
+    float4 CurrentRotation;
+    float4 PreviousPositionRadius;
+    float4 PreviousRotation;
+    float4 RestCentroidInvMass;
+    float4 VelocityMass;
+    float4 AngularVelocitySleeping;
+    uint4 ChunkIdFlags;
+};
+
+float4 TVFQuatNormalize(float4 Q)
+{
+    return Q * rsqrt(max(dot(Q, Q), 1.e-20f));
+}
+
+float4 TVFQuatMul(float4 A, float4 B)
+{
+    return float4(
+        A.w * B.x + A.x * B.w + A.y * B.z - A.z * B.y,
+        A.w * B.y - A.x * B.z + A.y * B.w + A.z * B.x,
+        A.w * B.z + A.x * B.y - A.y * B.x + A.z * B.w,
+        A.w * B.w - dot(A.xyz, B.xyz));
+}
+
+float3 TVFQuatRotate(float4 Q, float3 V)
+{
+    Q = TVFQuatNormalize(Q);
+    return V + 2.0f * cross(Q.xyz, cross(Q.xyz, V) + Q.w * V);
+}
+
+float4 TVFQuatNlerpShortest(float4 A, float4 B, float Alpha)
+{
+    if (dot(A, B) < 0.0f) B = -B;
+    return TVFQuatNormalize(lerp(A, B, saturate(Alpha)));
+}
+
+float3 TVFTransformRestPoint(TVFChunkMotionGPU Motion, float3 RestPoint)
+{
+    return Motion.CurrentPositionRadius.xyz +
+        TVFQuatRotate(Motion.CurrentRotation, RestPoint - Motion.RestCentroidInvMass.xyz);
+}
+
+float3 TVFTransformPreviousRestPoint(TVFChunkMotionGPU Motion, float3 RestPoint)
+{
+    return Motion.PreviousPositionRadius.xyz +
+        TVFQuatRotate(Motion.PreviousRotation, RestPoint - Motion.RestCentroidInvMass.xyz);
+}
+
+float3 TVFTransformInterpolatedRestPoint(TVFChunkMotionGPU Motion, float3 RestPoint, float Alpha)
+{
+    const float3 Position = lerp(Motion.PreviousPositionRadius.xyz, Motion.CurrentPositionRadius.xyz, saturate(Alpha));
+    const float4 Rotation = TVFQuatNlerpShortest(Motion.PreviousRotation, Motion.CurrentRotation, Alpha);
+    return Position + TVFQuatRotate(Rotation, RestPoint - Motion.RestCentroidInvMass.xyz);
+}
+
+float3 TVFTransformRestNormal(TVFChunkMotionGPU Motion, float3 RestNormal)
+{
+    return normalize(TVFQuatRotate(Motion.CurrentRotation, RestNormal));
+}
+
+bool TVFChunkIsSleeping(TVFChunkMotionGPU Motion) { return (Motion.ChunkIdFlags.y & 1u) != 0u; }
+bool TVFChunkIsDetached(TVFChunkMotionGPU Motion) { return (Motion.ChunkIdFlags.y & 2u) != 0u; }
+
+float4 TVFQuatFromRotationVector(float3 Radians)
+{
+    const float Angle = length(Radians);
+    if (Angle < 1.e-4f)
+    {
+        const float Scale = 0.5f - Angle * Angle / 48.0f;
+        return TVFQuatNormalize(float4(Radians * Scale, 1.0f - Angle * Angle / 8.0f));
+    }
+    const float Scale = sin(0.5f * Angle) / Angle;
+    return float4(Radians * Scale, cos(0.5f * Angle));
+}
+
+#endif // TVF_CHUNK_MOTION_USH

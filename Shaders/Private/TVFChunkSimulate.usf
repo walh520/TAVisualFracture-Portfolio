@@ -1,0 +1,55 @@
+#include "TVFChunkIntegrate.ush"
+
+// Integration contract: bind different input/output motion buffers (ping-pong). Do not call CPU MotionSystem::Step
+// for the same chunks while this shader is authoritative. CPU only submits topology/event patches and clears them
+// after they have been consumed by this dispatch.
+StructuredBuffer<TVFChunkMotionGPU> TVFInputChunkMotions;
+RWStructuredBuffer<TVFChunkMotionGPU> TVFOutputChunkMotions;
+StructuredBuffer<TVFChunkFieldGPU> TVFChunkFields;
+StructuredBuffer<TVFChunkPatchGPU> TVFChunkPatches;
+RWStructuredBuffer<float> TVFChunkSleepTimes;
+StructuredBuffer<TVFPlaneColliderGPU> TVFPlanes;
+
+cbuffer TVFChunkSimulateCBuffer
+{
+    // Exact C++ record order: tvf::GpuChunkSimulateParams (80 bytes).
+    float4 TVFTimeDragSleep;
+    float4 TVFSleepParams;
+    float4 TVFGravityWorld;
+    float4 TVFGlobalWindWorld;
+    uint4 TVFCounts;
+};
+
+[numthreads(64, 1, 1)]
+void TVFChunkSimulateCS(uint3 DispatchThreadId : SV_DispatchThreadID)
+{
+    const uint ChunkIndex = DispatchThreadId.x;
+    if (ChunkIndex >= TVFCounts.y) return;
+
+    TVFChunkMotionGPU Motion = TVFInputChunkMotions[ChunkIndex];
+    // Capture exactly once at render-step entry, even when TVFCounts.z is zero.
+    Motion.PreviousPositionRadius = Motion.CurrentPositionRadius;
+    Motion.PreviousRotation = Motion.CurrentRotation;
+    float SleepTimeSeconds = TVFChunkSleepTimes[ChunkIndex];
+
+    if ((TVFCounts.w & 2u) != 0u) TVFChunkApplyPatch(Motion, SleepTimeSeconds, TVFChunkPatches[ChunkIndex]);
+    TVFChunkFieldGPU Field;
+    if ((TVFCounts.w & 1u) != 0u) Field = TVFChunkFields[ChunkIndex];
+    else
+    {
+        Field.WindDragScale = float4(0.0f, 0.0f, 0.0f, 1.0f);
+        Field.AccelerationUnused = float4(0.0f, 0.0f, 0.0f, 0.0f);
+    }
+    TVFChunkSimulateParameters Parameters;
+    Parameters.TimeDragSleep = TVFTimeDragSleep;
+    Parameters.SleepParams = TVFSleepParams;
+    Parameters.GravityWorld = TVFGravityWorld;
+    Parameters.GlobalWindWorld = TVFGlobalWindWorld;
+    Parameters.Counts = TVFCounts;
+    [loop]
+    for (uint Substep = 0u; Substep < TVFCounts.z; ++Substep)
+        TVFChunkIntegrateSubstep(Motion, SleepTimeSeconds, Field, Parameters, TVFPlanes);
+
+    TVFChunkSleepTimes[ChunkIndex] = SleepTimeSeconds;
+    TVFOutputChunkMotions[ChunkIndex] = Motion;
+}

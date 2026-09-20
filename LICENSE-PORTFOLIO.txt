@@ -1,0 +1,15 @@
+TAVisualFracture Portfolio Source License
+
+Copyright (c) 2026 TAVisualFracture contributors. All rights reserved.
+
+Permission is granted to view and evaluate this repository for
+recruitment, interview, and educational review purposes only.
+
+Without prior written permission, no permission is granted to:
+- use this code in a production project;
+- copy, redistribute, or sublicense the implementation;
+- create or publish derivative implementations;
+- use the code commercially.
+
+This is source-available portfolio material, not an open-source license.
+Third-party files remain subject to their original licenses.
