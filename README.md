@@ -1,76 +1,79 @@
 # TAVisualFracture
 
-TAVisualFracture is an Unreal Engine plugin for editor-authored visual fracture previews. It converts a closed static mesh into reusable chunk and bond data, exposes a deterministic impact workflow, and simulates detached chunks with a CPU reference motion system. The release contains source code, shaders, tests, and design documentation; project assets and generated build products are intentionally excluded.
+CPU 固定步长视觉破碎预览
 
-TAVisualFracture 是一个面向 Unreal Engine 编辑器预览的视觉破碎插件。它把闭合 Static Mesh 烘焙为可复用的碎块与 Bond 数据，提供确定性的冲击操作流程，并使用 CPU 参考运动系统驱动脱离碎块。本发布只包含源码、Shader、测试和设计文档，不包含项目资产或生成的构建产物。
+> CPU 固定步长编辑器预览；独立核心测试有记录，不是 GPU / Chaos 完整物理系统。
 
-## Scope
+[GitHub 仓库](https://github.com/walh520/TAVisualFracture-Portfolio)
 
-- LOD0 closed Static Mesh authoring and deterministic chunk/bond baking.
-- Editor-only bake, Landscape capture, impact presets, preview, reset, and cleanup.
-- CPU fixed-step chunk motion with gravity, drag, angular motion, support connectivity, Bond damage, and sleep semantics.
-- Lightweight landed XY avoidance and optional registered static-Box response for visual preview.
-- Procedural Mesh rendering for temporary preview chunks; collision is disabled on preview render components.
-- Runtime-facing data structures remain separated from the editor bake and preview services.
+## 简介与公开范围
 
-This release does not provide Chaos integration, GPU simulation, network replication, PIE/gameplay hit detection, dynamic rigid bodies, scene-wide collision, Nanite fracture rendering, or production material fidelity.
+面向 Unreal 编辑器创作和预览的视觉破碎插件。闭合 Static Mesh 被烘焙为可复用的碎块与 Bond 数据，脱离碎块由 CPU 参考运动系统驱动。本仓库包含源码、Shader、测试和设计文档，不含项目资产与生成构建产物。
 
-## Architecture
+## 本地工程与公开快照
 
-```text
-StaticMeshActor + UTAVisualFractureComponent
-        |
-        v
-TAVisualFractureEditor
-  bake / Landscape capture / preview lifecycle / temporary PMC
-        |
-        v
-TAVisualFractureRuntime assets and reflected settings
-        |
-        v
-TAVisualFractureCore
-  normalized geometry / SDF / seeds / Power partition / bonds / motion
-        |
-        +--> TVFChunkSimulate.usf and shared motion data contracts
+与本地插件对应的 55 个公开路径中，34 个逐字节相同、14 个仅换行不同；另外 7 个是公开包增加的说明/验收文档，本地插件目录没有对应文件。已对应的代码实现没有内容差异，不能把这 7 个文档缺项描述成实现缺失。
+
+编辑器 PreviewManager 持有 CPU `tvf::MotionSystem`，以固定步长推进碎片；预览用 ProceduralMeshComponent 且关闭组件碰撞。Shader 文件存在不代表当前预览切到 GPU，Runtime 模块存在也不代表 Chaos 或完整 PIE 物理已经接通。
+
+## 演示
+
+[破碎与溶解作品演示](https://www.bilibili.com/video/BV1Tteb6jEEr/) · [作品总集](https://www.bilibili.com/video/BV1MVak6jEPv/)
+
+该视频是作品演示入口，可能包含本仓库以外的溶解效果和完整项目资产。本仓库公开范围只按视觉破碎编辑器预览说明，不把视频中的其他系统归入当前代码。
+
+## 实现与贡献
+
+[ATTRIBUTION.md](ATTRIBUTION.md) 将插件架构、数据契约、编辑器流程、临时渲染路径、碰撞适配、诊断与验证流程列为项目实现工作。Voronoi/Power partition、SDF、刚体运动、解析阻尼、接触与图连通性为已有方法；本页不扩展作者或原创算法归属。
+
+## 核心功能
+
+- LOD0 闭合网格的确定性碎块与 Bond 烘焙。
+- Editor 中 Bake、Landscape 捕获、冲击预设、Fracture、Reset 与清理。
+- CPU 固定步长：重力、阻尼、角运动、支撑连通性、Bond 损伤及休眠。
+- 落地后的 XY 碎块避让与可选已注册 Box 响应。
+- 临时 Procedural Mesh 展示；预览渲染组件禁用碰撞。
+
+## 方案与取舍
+
+| 选择 | 目的与边界 |
+| --- | --- |
+| UObject 无关 Core + Runtime 数据 + Editor 服务 | 将纯数学与引擎资产访问分开，支持独立核心回归。 |
+| CPU 固定步长参考运动 | 使时间推进与状态约定可审阅；不宣称 GPU 模拟。 |
+| 落地 XY 圆形/矩形近似接触 | 服务视觉分离与编辑器操作，不能替代完整刚体求解器。 |
+| 临时 PMC 作为预览输出 | 便于恢复原网格和清理；不等同于 Nanite 破碎或生产材质保真。 |
+
+实际执行链是 Editor PreviewManager → CPU MotionSystem → 固定步长累加器/StepFixed → 更新预览网格。几何/接触近似服务于可控编辑器预览；不把视觉碎裂片段当成 GPU 刚体、Chaos、任意场景连续碰撞或稳定堆叠的验证。
+
+## 代码阅读入口
+
+1. [架构](Docs/Architecture_CN_EN.md) 与 [数据流](Docs/DataFlow_CN_EN.md)。
+2. [TVFFracture.cpp](Source/TAVisualFractureCore/Private/TVFFracture.cpp)、[TVFMotion.cpp](Source/TAVisualFractureCore/Private/TVFMotion.cpp)、[TVFCollision.cpp](Source/TAVisualFractureCore/Private/TVFCollision.cpp)：烘焙、时间推进和碰撞。
+3. [Runtime Component](Source/TAVisualFractureRuntime/Public/TAVisualFractureComponent.h) 与 [PreviewManager](Source/TAVisualFractureEditor/Private/TAVisualFracturePreviewManager.cpp)：数据与编辑器预览。
+4. [CollisionStandalone.cpp](Tests/CollisionStandalone.cpp)、[验证状态](Docs/VerificationStatus_CN_EN.md)、[发布边界](Docs/ReleaseBoundary_CN_EN.md)。
+
+## 验证与性能
+
+原仓库记录独立 C++ 核心 runner 的结果为 `PASS 4724 checks`。这是发布快照的原记录，本次整理未重跑；只支持独立核心层的结论。
+
+UBT/UHT、ShaderCompileWorker、Editor/PIE、GPU Capture、真实资产预览和编辑器性能仍待验证，不能从该计数推导通过。高碎块数量、真实拖动响应与帧耗时没有在本次整理中测量。
+
+## 依赖与运行方式
+
+目标 UE 5.7.4，依赖引擎提供的 ProceduralMeshComponent、GeometryCore、Landscape、MeshDescription、StaticMeshDescription、PropertyEditor、LevelEditor、AssetTools、UnrealEd 等模块，完整划分见 [DEPENDENCIES.md](DEPENDENCIES.md)。
+
+在兼容工程中集成并构建后，按原工作流：向 StaticMeshActor 添加 UTAVisualFractureComponent → Bake → 捕获 Landscape 高度快照 → 选择冲击预设并 Fracture → Reset 恢复源网格、清理临时组件。UE 路径待实际验证。
+
+独立核心 runner 需要 MSVC C++ 工具；原脚本使用 C++20：
+
+```powershell
+.\Tests\Run-CollisionStandalone.ps1
 ```
 
-The core module is UObject-independent. The Editor module owns UObject access, MeshDescription capture, Landscape sampling, asset writes, and preview lifetime. The Runtime module owns reflected component and asset types. ProceduralMeshComponent is used only for temporary visual output.
+## 限制与来源许可
 
-## Editor workflow
+不提供 Chaos 集成、GPU 模拟、网络复制、PIE/gameplay 命中检测、动态刚体或全场景碰撞。Shader 文件的存在不改变当前 CPU 预览定位。
 
-1. Add `UTAVisualFractureComponent` to a `StaticMeshActor`.
-2. Bake the target mesh into a `UTAVisualFractureAsset`.
-3. Capture the intended Landscape height snapshot.
-4. Choose an impact preset and press Fracture in the editor preview.
-5. Use Reset to restore the source mesh and destroy temporary preview components.
+输入须为有限、闭合、朝向一致且适合所选 Bake 模式的 LOD0 网格；不支持空中碎块相互/外部碰撞。Box 是落地 XY 矩形近似，不保证顶部支撑或堆叠；高速薄墙、极端质量比、精确凹碰撞与大型堆叠不在本轮边界。
 
-The lightweight collision path is explicitly landed-only. It uses circular XY chunk footprints and registered Box rectangles for visual separation. Moving registered Boxes can transfer horizontal velocity and apply a small one-shot lift when a new contact closes quickly. This is an intentional approximation, not a replacement for a rigid-body solver.
-
-## Repository layout
-
-- `Source/TAVisualFractureCore`: pure fracture, geometry, bond, collision, and motion contracts.
-- `Source/TAVisualFractureRuntime`: reflected components, assets, and runtime-facing data.
-- `Source/TAVisualFractureEditor`: bake, Landscape, details panel, preview, and editor collision adapters.
-- `Shaders/Private`: chunk motion and interior-detail shader sources.
-- `Tests`: standalone C++ regression runner, editor test fixtures, and verification notes.
-- `Docs`: bilingual architecture, data flow, API, dependency, attribution, boundary, and verification notes.
-
-## Dependencies
-
-The plugin targets Unreal Engine 5.7.4 and the engine-provided ProceduralMeshComponent, GeometryCore, Landscape, MeshDescription, StaticMeshDescription, PropertyEditor, LevelEditor, AssetTools, and UnrealEd modules. See [DEPENDENCIES.md](DEPENDENCIES.md) for the exact module boundary.
-
-## Verification status
-
-The standalone collision runner has been executed for the current source snapshot and reports `PASS 4724 checks`. This is evidence for the independent C++ core only. UBT/UHT, ShaderCompileWorker, Editor/PIE, GPU capture, real asset preview, and in-editor performance validation are marked pending in [Docs/VerificationStatus_CN_EN.md](Docs/VerificationStatus_CN_EN.md).
-
-## Source and attribution boundary
-
-This repository is source-available under the accompanying review license, not an open-source license. The implementation is an independent Unreal Engine integration of established physical methods. It does not claim ownership of the underlying mathematical methods; the architecture, data contracts, editor workflow, collision adapter, diagnostics, and validation pipeline are documented as implementation work. See [ATTRIBUTION.md](ATTRIBUTION.md) and [LICENSE-PORTFOLIO.txt](LICENSE-PORTFOLIO.txt).
-
-## Current limitations
-
-- Input geometry is expected to be LOD0, finite, closed, consistently oriented, and suitable for the selected bake mode.
-- The visual collision path does not support airborne chunk-to-chunk or external collision.
-- Box collision is a landed XY rectangle approximation without top support or stacking guarantees.
-- High-speed thin-wall interaction, large stacks, extreme mass ratios, and precise concave collision are outside this release boundary.
-- No generated assets, maps, materials, screenshots, videos, binaries, or engine source are included.
+使用 [LICENSE-PORTFOLIO.txt](LICENSE-PORTFOLIO.txt) 的源码审阅许可；原说明不授予生产复用或再分发权利。保留 [ATTRIBUTION.md](ATTRIBUTION.md)，不称为开源许可。
